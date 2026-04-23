@@ -1,0 +1,192 @@
+---
+name: voicebox
+description: >
+  Text-to-speech skill using Voicebox API. Use when user explicitly requests TTS tasks
+  such as: text-to-speech, generate audio, read text aloud, convert text to audio,
+  语音合成, 文字转语音, 朗读, 生成语音, or any request to turn text into spoken audio.
+  Do NOT trigger for general questions about speech or audio concepts.
+---
+
+# Voicebox TTS
+
+Generate spoken audio from text using the Voicebox API.
+
+## Prerequisites
+
+The environment variable `VOICEBOX_API_BASE_URL` **must** be set before proceeding. If it is missing or empty, inform the user and stop:
+
+> "VOICEBOX_API_BASE_URL is not set. Please set it to your Voicebox API base URL (e.g. `http://localhost:17493`) and try again."
+
+Do NOT attempt any API calls without this variable.
+
+## Tool Constraint
+
+All API requests MUST be made using `curl` directly in the shell via the Bash tool. Do NOT write Python scripts, JavaScript, or any other code files to interact with the API. The agent runs `curl` commands inline and parses JSON responses using short one-liners (e.g. `python3 -c "import json,sys; ..."` for JSON field extraction is acceptable, but no script files).
+
+## API Reference (embedded)
+
+All endpoints are relative to `$VOICEBOX_API_BASE_URL`.
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/profiles` | GET | List all voice profiles |
+| `/generate` | POST | Generate speech from text |
+| `/generate/{generation_id}/status` | GET | Poll generation status |
+| `/audio/{generation_id}` | GET | Download generated audio |
+
+If you need to discover additional endpoints, the full OpenAPI spec is available at `GET {VOICEBOX_API_BASE_URL}/openapi.json`.
+
+### POST /generate - Request Body
+
+```json
+{
+  "profile_id": "string (required)",
+  "text": "string (required, max 50000)",
+  "language": "zh|en (default: en)",
+  "engine": "qwen|qwen_custom_voice|luxtts|chatterbox|chatterbox_turbo|tada|kokoro (default: qwen)",
+  "model_size": "1.7B|0.6B|1B|3B (default: 1.7B)",
+  "seed": "integer or null",
+  "instruct": "string or null (max 500, instruction text for instruct-mode engines)",
+  "max_chunk_chars": "integer (100-5000, default: 800)",
+  "crossfade_ms": "integer (0-500, default: 50)",
+  "normalize": "boolean (default: true)"
+}
+```
+
+### POST /generate - Response
+
+```json
+{
+  "id": "string (generation ID)",
+  "profile_id": "string",
+  "text": "string",
+  "language": "string",
+  "status": "completed|... (defaults to completed)",
+  "audio_path": "string or null",
+  "duration": "number or null (seconds)",
+  "error": "string or null"
+}
+```
+
+### GET /profiles - Response
+
+Array of profile objects:
+```json
+[
+  {
+    "id": "string",
+    "name": "string",
+    "description": "string or null",
+    "language": "zh|en|ja|ko|...",
+    "voice_type": "cloned|preset|designed",
+    "default_engine": "string or null"
+  }
+]
+```
+
+## Workflow
+
+### Step 1: List profiles
+
+```bash
+curl -s "$VOICEBOX_API_BASE_URL/profiles"
+```
+
+Parse the response array. Each profile has `id`, `name`, `description`, `language`, `voice_type`, `default_engine`.
+
+### Step 2: Select profile by language
+
+Detect the user's intended language from the input text:
+
+- **Chinese** (`zh`): text contains CJK characters (Unicode range `\u4e00-\u9fff`, `\u3400-\u4dbf`, or common CJK punctuation)
+- **English** (`en`): everything else (default)
+
+Filter profiles where `profile.language` matches the detected language code (`"zh"` or `"en"`).
+
+- **If exactly one match** → use it.
+- **If multiple matches** → use the first match, but mention the alternatives to the user (list their names). User can specify a voice name in a follow-up.
+- **If no match** → inform the user no profile was found for that language, list all available profiles with their names and languages, and ask which to use.
+
+### Step 3: Generate speech
+
+```bash
+curl -s -X POST "$VOICEBOX_API_BASE_URL/generate" \
+  -H "Content-Type: application/json" \
+  -d "{\"profile_id\": \"SELECTED_PROFILE_ID\", \"text\": \"USER_TEXT\", \"language\": \"zh\"}"
+```
+
+- Use the `profile_id` from step 2.
+- Set `language` to the detected language code (`"zh"` or `"en"`).
+- Only include optional fields (`engine`, `seed`, `instruct`, `model_size`) if the user specifically requests them.
+
+If the response `status` is `"completed"` and `error` is null/absent, proceed to step 5 (download).
+
+### Step 4: Poll status (only if not immediately completed)
+
+If the generation is not yet complete, poll every 2 seconds:
+
+```bash
+curl -s "$VOICEBOX_API_BASE_URL/generate/{generation_id}/status"
+```
+
+- **Timeout:** 3 minutes (90 polls). If exceeded, inform the user the generation is taking long and share the generation ID.
+- **Completion:** when status indicates success/completion with no error.
+- **Error:** if `error` is non-null, report it to the user and stop.
+
+### Step 5: Download audio
+
+Determine the output directory:
+
+1. **Preferred:** `{workspace_root}/voicebox-downloads/` (where `workspace_root` is the current project/workspace directory)
+2. **Fallback:** `~/Downloads/voicebox/` (use this only if the workspace root is unavailable or the user explicitly prefers it)
+
+```bash
+mkdir -p ./voicebox-downloads && curl -s -o ./voicebox-downloads/voicebox_$(date +%Y%m%d_%H%M%S).wav \
+  "$VOICEBOX_API_BASE_URL/audio/{generation_id}"
+```
+
+- Always run `mkdir -p` before downloading to ensure the directory exists.
+- If the user specifies a different path, use that instead.
+- After download, verify the file exists and report the full path to the user.
+
+## Language Detection Rules
+
+| Input Pattern | Language Code |
+|---|---|
+| Contains Chinese characters (CJK Unified Ideographs) | `zh` |
+| All other text | `en` |
+
+## Error Handling
+
+| Scenario | Action |
+|---|---|
+| `VOICEBOX_API_BASE_URL` not set | Tell user to set it, stop |
+| API connection refused / timeout | Tell user the Voicebox server may not be running, stop |
+| No matching profile for language | List all profiles, ask user to pick one |
+| Generation returns error | Show the error message to the user |
+| Poll timeout (3 min) | Tell user generation is slow, share generation ID |
+| Download fails | Report failure, suggest retrying manually |
+
+## Examples
+
+### Chinese TTS
+
+```
+User: "帮我把这段话转成语音：今天天气真好"
+
+→ GET /profiles → find profile with language "zh" → use first match
+→ POST /generate {"profile_id": "xxx", "text": "今天天气真好", "language": "zh"}
+→ GET /audio/{id} → save to ./voicebox-downloads/voicebox_20260422_143052.wav
+→ "Audio saved to ./voicebox-downloads/voicebox_20260422_143052.wav (duration: 3.2s)"
+```
+
+### English TTS
+
+```
+User: "Convert this to speech: The quick brown fox jumps over the lazy dog"
+
+→ GET /profiles → find profile with language "en" → use first match
+→ POST /generate {"profile_id": "yyy", "text": "The quick brown fox jumps over the lazy dog", "language": "en"}
+→ GET /audio/{id} → save to ./voicebox-downloads/voicebox_20260422_143100.wav
+→ "Audio saved to ./voicebox-downloads/voicebox_20260422_143100.wav (duration: 5.1s)"
+```
