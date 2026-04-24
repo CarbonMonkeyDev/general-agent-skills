@@ -6,6 +6,7 @@ General-purpose agent skills for writing, communication, and content creation.
 | Skill | Description |
 |-------|-------------|
 | [humanizer](skills/humanizer/) | Removes AI-writing patterns and rewrites text to sound natural and human |
+| [whisper-cli](skills/whisper-cli/) | Speech-to-text transcription using whisper-cli (whisper.cpp) |
 
 ## Install
 
